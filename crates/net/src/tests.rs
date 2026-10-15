@@ -78,7 +78,7 @@ impl TestServer {
         let publisher = tokio::spawn({
             let server = server.clone();
             async move {
-                for seq in 0.. {
+                for seq in 0..=u64::MAX {
                     server.publish(VideoFrame {
                         seq,
                         capture_time_us: 0,
@@ -576,7 +576,7 @@ async fn raw_broadcaster(odd: Vec<u8>) -> (SocketAddr, Fingerprint, JoinHandle<(
         write_stream_kind(&mut video, StreamKind::Video)
             .await
             .unwrap();
-        for seq in 0.. {
+        for seq in 0..=u64::MAX {
             let frame = VideoFrame {
                 seq,
                 capture_time_us: 0,

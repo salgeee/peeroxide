@@ -142,7 +142,7 @@ fn fill(data: &mut [u8], x: u32, y: u32, w: u32, h: u32, px: [u8; 4]) {
     for row in y..(y + h).min(HEIGHT) {
         let start = ((row * WIDTH + x) * 4) as usize;
         let end = ((row * WIDTH + (x + w).min(WIDTH)) * 4) as usize;
-        for chunk in data[start..end].chunks_exact_mut(4) {
+        for chunk in data[start..end].as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&px);
         }
     }

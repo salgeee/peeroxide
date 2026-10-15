@@ -135,7 +135,7 @@ impl Thumbnails {
 
 fn to_image(frame: peeroxide_capture::Frame) -> ColorImage {
     let mut rgba = frame.data;
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &rgba)

@@ -296,7 +296,7 @@ fn publish_preview(slot: &Mutex<Option<PreviewFrame>>, canvas: &Canvas) {
         return;
     };
     let mut rgba = small.data;
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     *slot.lock().unwrap() = Some(PreviewFrame {

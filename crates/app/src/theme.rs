@@ -2,8 +2,8 @@
 //! Windows has them installed. The font files stay on the machine; nothing is bundled.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, Color32, Stroke};
 
@@ -183,7 +183,9 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 fn read_face(dir: &Path, names: &[&str]) -> Option<Vec<u8>> {
-    names.iter().find_map(|name| std::fs::read(dir.join(name)).ok())
+    names
+        .iter()
+        .find_map(|name| std::fs::read(dir.join(name)).ok())
 }
 
 /// Family for the condensed labels. The proportional face when that font is not installed.

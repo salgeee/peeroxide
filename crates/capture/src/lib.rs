@@ -277,7 +277,9 @@ mod tests {
 
     #[test]
     fn downscale_averages_a_solid_block() {
-        let bgra = vec![0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255];
+        let bgra = vec![
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+        ];
         let small = downscale_bgra(2, 2, &bgra, 1).unwrap();
         assert_eq!((small.width, small.height), (1, 1));
         assert_eq!(&small.data, &[0, 0, 255, 255]);

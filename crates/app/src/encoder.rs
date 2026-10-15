@@ -117,8 +117,10 @@ impl EncoderPipeline {
                 let stats = stats.clone();
                 let preview = preview.clone();
                 move || {
-                    let end = run(&control, &source, &preset, codec, on_packet, &stats, &preview)
-                        .unwrap_or_else(|e| EncoderEnd::Failed(format!("{e:#}")));
+                    let end = run(
+                        &control, &source, &preset, codec, on_packet, &stats, &preview,
+                    )
+                    .unwrap_or_else(|e| EncoderEnd::Failed(format!("{e:#}")));
                     tracing::info!(?end, source = %source.name, "encoder pipeline ended");
                     on_end(end);
                 }

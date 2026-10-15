@@ -192,11 +192,8 @@ impl App {
     fn identity_ui(&mut self, ui: &mut egui::Ui) {
         let station = station_of(ui);
         ui.add(
-            egui::Image::from_bytes(
-                "bytes://pier",
-                include_bytes!("../../../assets/icon.png"),
-            )
-            .fit_to_exact_size(vec2(22.0, 22.0)),
+            egui::Image::from_bytes("bytes://pier", include_bytes!("../../../assets/icon.png"))
+                .fit_to_exact_size(vec2(22.0, 22.0)),
         );
         ui.label(RichText::new("Peeroxide").color(station.body).strong());
         // right_to_left would reverse each group, so the name and the update note are their own rows.
@@ -241,7 +238,11 @@ impl App {
                     self.name_edit = None;
                 }
             } else {
-                ui.label(RichText::new(self.ctrl.display_name()).color(station.body).strong());
+                ui.label(
+                    RichText::new(self.ctrl.display_name())
+                        .color(station.body)
+                        .strong(),
+                );
                 let live = self.ctrl.broadcast.is_some();
                 let edit = ui
                     .add_enabled(!live, egui::Button::new("Edit").small())
@@ -841,9 +842,7 @@ impl App {
             ViewerState::Streaming {
                 broadcaster_name, ..
             } => {
-                ui.label(
-                    RichText::new(format!("Watching {broadcaster_name}")).color(station.body),
-                );
+                ui.label(RichText::new(format!("Watching {broadcaster_name}")).color(station.body));
                 self.volume_ui(ui);
                 ui.horizontal(|ui| {
                     if ui.button("■ Stop watching").clicked() {
@@ -871,27 +870,28 @@ impl App {
         }
 
         ui.add_space(8.0);
-        egui::CollapsingHeader::new(
-            RichText::new("Connect manually").color(station.muted),
-        )
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new("IP:PORT#FINGERPRINT, for networks where discovery is blocked")
-                    .color(station.muted),
-            );
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.connect_input)
-                    .desired_width(ui.available_width())
-                    .hint_text("192.168.0.10:50123#3f9a…"),
-            );
-            let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Watch").clicked() || submitted {
-                match parse_connect(&self.connect_input) {
-                    Ok(target) => self.watch(target),
-                    Err(e) => self.watch_note = Some(e.to_string()),
+        egui::CollapsingHeader::new(RichText::new("Connect manually").color(station.muted)).show(
+            ui,
+            |ui| {
+                ui.label(
+                    RichText::new("IP:PORT#FINGERPRINT, for networks where discovery is blocked")
+                        .color(station.muted),
+                );
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.connect_input)
+                        .desired_width(ui.available_width())
+                        .hint_text("192.168.0.10:50123#3f9a…"),
+                );
+                let submitted =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Watch").clicked() || submitted {
+                    match parse_connect(&self.connect_input) {
+                        Ok(target) => self.watch(target),
+                        Err(e) => self.watch_note = Some(e.to_string()),
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Mute button and volume slider, or why there is nothing to hear.
@@ -1274,7 +1274,10 @@ impl App {
                         if ui.button("Close").clicked() {
                             close = true;
                         }
-                        if ui.button("Refresh").on_hover_text("Look for windows again").clicked()
+                        if ui
+                            .button("Refresh")
+                            .on_hover_text("Look for windows again")
+                            .clicked()
                         {
                             refresh = true;
                         }
@@ -1594,7 +1597,8 @@ fn lamp(ui: &mut egui::Ui, station: &Station, on: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(diameter, diameter), Sense::hover());
     let center = rect.center();
     if on {
-        ui.painter().circle_filled(center, diameter * 0.5, station.lamp);
+        ui.painter()
+            .circle_filled(center, diameter * 0.5, station.lamp);
     } else {
         ui.painter()
             .circle_filled(center, diameter * 0.5 - 1.0, station.lamp_off);
@@ -1616,8 +1620,7 @@ fn plate(
     selected: bool,
     mark: Option<&str>,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     let stroke = if selected { 2.0 } else { station.line_w };
     let line = if selected { station.ink } else { station.line };
     paint_key(ui, rect, station.paper, line, stroke);
@@ -1690,12 +1693,7 @@ fn source_caption(source: &Source) -> (String, String) {
 
 fn monitor_caption(name: &str) -> (String, String) {
     let (head, rest) = name.split_once('(').unwrap_or((name, ""));
-    let title = head
-        .split(':')
-        .next()
-        .unwrap_or(head)
-        .trim()
-        .to_string();
+    let title = head.split(':').next().unwrap_or(head).trim().to_string();
     let subtitle = rest
         .replace(')', "")
         .replace('x', "×")
@@ -1708,10 +1706,7 @@ fn monitor_caption(name: &str) -> (String, String) {
 
 fn window_caption(name: &str) -> (String, String) {
     match name.rsplit_once(" [") {
-        Some((title, process)) => (
-            title.to_string(),
-            process.trim_end_matches(']').to_string(),
-        ),
+        Some((title, process)) => (title.to_string(), process.trim_end_matches(']').to_string()),
         None => (name.to_string(), String::new()),
     }
 }

@@ -1247,7 +1247,7 @@ impl App {
     }
 
     fn source_modal(&mut self, ctx: &egui::Context) {
-        let station = if ctx.style().visuals.dark_mode {
+        let station = if ctx.global_style().visuals.dark_mode {
             Station::dark()
         } else {
             Station::light()

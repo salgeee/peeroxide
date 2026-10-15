@@ -84,9 +84,18 @@ pub struct EncoderStats {
     pub codec: Option<String>,
 }
 
+/// A small RGBA copy of a frame the encoder already captured, for the station's own well.
+#[derive(Clone)]
+pub struct PreviewFrame {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
 pub struct EncoderPipeline {
     control: Arc<EncoderControl>,
     pub stats: Arc<Mutex<EncoderStats>>,
+    preview: Arc<Mutex<Option<PreviewFrame>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -100,13 +109,15 @@ impl EncoderPipeline {
         on_end: impl FnOnce(EncoderEnd) + Send + 'static,
     ) -> anyhow::Result<Self> {
         let stats = Arc::new(Mutex::new(EncoderStats::default()));
+        let preview = Arc::new(Mutex::new(None));
         let thread = std::thread::Builder::new()
             .name("encoder".into())
             .spawn({
                 let control = control.clone();
                 let stats = stats.clone();
+                let preview = preview.clone();
                 move || {
-                    let end = run(&control, &source, &preset, codec, on_packet, &stats)
+                    let end = run(&control, &source, &preset, codec, on_packet, &stats, &preview)
                         .unwrap_or_else(|e| EncoderEnd::Failed(format!("{e:#}")));
                     tracing::info!(?end, source = %source.name, "encoder pipeline ended");
                     on_end(end);
@@ -116,8 +127,14 @@ impl EncoderPipeline {
         Ok(Self {
             control,
             stats,
+            preview,
             thread: Some(thread),
         })
+    }
+
+    /// The newest preview, if one was published since the last take.
+    pub fn take_preview(&self) -> Option<PreviewFrame> {
+        self.preview.lock().unwrap().take()
     }
 }
 
@@ -144,6 +161,7 @@ fn run(
     mut codec: Codec,
     mut on_packet: impl FnMut(VideoFrame),
     stats: &Mutex<EncoderStats>,
+    preview: &Mutex<Option<PreviewFrame>>,
 ) -> anyhow::Result<EncoderEnd> {
     // Paced from when a frame is taken (not when encoding ends) so encode time doesn't accumulate
     // as drift; the slack absorbs jitter in the source's own cadence.
@@ -152,6 +170,7 @@ fn run(
     let mut session: Option<Session> = None;
     let mut seq = 0u64;
     let mut last_take = Instant::now() - pace;
+    let mut last_preview = Instant::now() - Duration::from_secs(1);
 
     loop {
         if control.stop.load(Ordering::Relaxed) {
@@ -163,6 +182,7 @@ fn run(
                 let mut stats = stats.lock().unwrap();
                 stats.canvas = None;
                 stats.codec = None;
+                *preview.lock().unwrap() = None;
             }
             control.sleep(Duration::from_millis(250));
             continue;
@@ -206,6 +226,10 @@ fn run(
                     Canvas::new(w, h)
                 });
                 canvas.draw(&frame.data, frame.width, frame.height)?;
+                if last_preview.elapsed() >= Duration::from_millis(250) {
+                    publish_preview(preview, canvas);
+                    last_preview = Instant::now();
+                }
                 (frame.captured_at, true)
             }
             Next::Timeout => (Instant::now(), false),
@@ -260,6 +284,24 @@ fn run(
         });
         seq += 1;
     }
+}
+
+/// Keeps a copy at most 480 px wide. The encoder already drew this picture; nothing new is captured.
+fn publish_preview(slot: &Mutex<Option<PreviewFrame>>, canvas: &Canvas) {
+    let Some(small) =
+        peeroxide_capture::downscale_bgra(canvas.width(), canvas.height(), canvas.bgra(), 480)
+    else {
+        return;
+    };
+    let mut rgba = small.data;
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    *slot.lock().unwrap() = Some(PreviewFrame {
+        width: small.width as usize,
+        height: small.height as usize,
+        rgba,
+    });
 }
 
 pub fn wall_clock_us(at: Instant) -> u64 {

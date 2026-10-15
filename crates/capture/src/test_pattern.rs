@@ -38,6 +38,12 @@ impl Drop for Guard {
     }
 }
 
+/// One still of the pattern, for a picker card. No thread and no flash: the bars are enough
+/// to recognize it.
+pub(crate) fn still() -> Frame {
+    render(&background(), 0)
+}
+
 pub(crate) fn start(slot: Arc<FrameSlot>, fps: u32) -> Guard {
     let stop = Arc::new(AtomicBool::new(false));
     let interval = Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));

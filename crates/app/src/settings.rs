@@ -7,6 +7,34 @@ use serde::{Deserialize, Serialize};
 
 const FILE: &str = "settings.toml";
 
+/// Which station palette to paint. `System` follows Windows.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::System => Self::Dark,
+            Self::Dark => Self::Light,
+            Self::Light => Self::System,
+        }
+    }
+}
+
 /// User preferences persisted per profile.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -26,6 +54,8 @@ pub struct Settings {
     pub audio_apps: BTreeMap<String, bool>,
     /// Where the mini player was left: x, y, width, height in whole points.
     pub mini_player: Option<[i32; 4]>,
+    /// Station palette. Missing in older files, which follow the system theme.
+    pub theme: ThemeChoice,
 }
 
 impl Settings {
@@ -75,6 +105,7 @@ mod tests {
             muted: true,
             audio_apps: BTreeMap::from([("discord.exe".into(), false), ("game.exe".into(), true)]),
             mini_player: Some([1504, 791, 400, 225]),
+            theme: ThemeChoice::Dark,
         };
         s.save(dir.path()).unwrap();
         let loaded = Settings::load(dir.path());
@@ -103,6 +134,7 @@ mod tests {
             s.mini_player, None,
             "the mini player opens in its default corner"
         );
+        assert_eq!(s.theme, ThemeChoice::System);
         assert_eq!(s.volume(), 1.0);
         let loud = Settings {
             volume: Some(250),

@@ -23,14 +23,14 @@ use crate::encoder::{EncoderEnd, PreviewFrame};
 use crate::fullscreen;
 use crate::mini_player::{self, Action};
 use crate::mute_apps;
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, Station};
 use crate::thumbs::Thumbnails;
 use crate::video::VideoView;
 use crate::viewer_state::{PeerRef, ViewerInput, ViewerState};
 
 const FULLSCREEN_BAR_HEIGHT: f32 = 56.0;
-const COLUMN_WIDTH: f32 = 320.0;
+const COLUMN_WIDTH: f32 = 340.0;
 const MAX_NAME_CHARS: usize = 40;
 
 pub struct App {
@@ -75,6 +75,8 @@ pub struct App {
     /// The source picker is open.
     picker: bool,
     thumbs: Thumbnails,
+    /// The picker capture has been started for this run.
+    thumbs_started: bool,
     /// Last copy of a frame this machine already captured, shown in the well while broadcasting.
     preview: Option<TextureHandle>,
 }
@@ -98,6 +100,7 @@ impl App {
         ctx: egui::Context,
     ) -> anyhow::Result<Self> {
         theme::install_fonts(&ctx);
+        egui_extras::install_image_loaders(&ctx);
         let ctrl = Controller::new(identity, display_name, ctx)?;
         let video = Arc::new(Mutex::new(VideoView::default()));
         let mini = mini_player::Shared::new(video.clone(), ctrl.video.clone(), ctrl.output.clone());
@@ -134,6 +137,7 @@ impl App {
             fullscreen_since: None,
             picker: false,
             thumbs: Thumbnails::new(),
+            thumbs_started: false,
             preview: None,
         };
         app.ctrl.output.set_volume(app.settings.volume());
@@ -193,15 +197,22 @@ impl App {
         let station = station_of(ui);
         ui.add(
             egui::Image::from_bytes("bytes://pier", include_bytes!("../../../assets/icon.png"))
-                .fit_to_exact_size(vec2(22.0, 22.0)),
+                .fit_to_exact_size(vec2(32.0, 32.0)),
         );
-        ui.label(RichText::new("Peeroxide").color(station.body).strong());
+        ui.label(
+            RichText::new("Peeroxide")
+                .color(station.body)
+                .font(FontId::new(22.0, theme::condensed())),
+        );
         // right_to_left would reverse each group, so the name and the update note are their own rows.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let choice = self.settings.theme;
-            if ui
-                .small_button(choice.label())
-                .on_hover_text("Station theme. System follows Windows.")
+            let hover = match choice {
+                ThemeChoice::System => "System. Follows Windows.",
+                ThemeChoice::Dark | ThemeChoice::Light => choice.label(),
+            };
+            if theme_button(ui, &station, choice)
+                .on_hover_text(hover)
                 .clicked()
             {
                 self.settings.theme = choice.next();
@@ -437,16 +448,11 @@ impl App {
         let station = station_of(ui);
         lamp(ui, &station, false);
         ui.add_space(8.0);
-        if self.setting_row(ui, "Source", &self.source_title()) {
+        if column_key(ui, &station, "Start broadcasting")
+            .on_hover_text("Choose a window and quality")
+            .clicked()
+        {
             self.open_picker();
-        }
-        if self.setting_row(ui, "Quality", &preset_short(self.preset)) {
-            self.open_picker();
-        }
-        self.share_audio_ui(ui);
-        ui.add_space(8.0);
-        if station_button(ui, &station, "Start broadcasting", true).clicked() {
-            self.start_broadcast();
         }
     }
 
@@ -491,34 +497,31 @@ impl App {
                 broadcast.source_name.clone(),
                 stats_line,
                 audio,
-                matches!(
-                    broadcast.audio.as_ref().map(|a| &a.source),
-                    Some(AudioSource::System { .. })
-                ),
                 broadcast.audio_note.clone(),
             )
         }) else {
             return;
         };
-        let (name, stats_line, audio, system_audio, note) = signal;
-        ui.horizontal(|ui| {
-            lamp(ui, &station, true);
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(format!("Sharing {}", truncate(&name, 32)))
-                        .color(station.body)
-                        .size(16.0),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "{viewers} viewer{}",
-                        if viewers == 1 { "" } else { "s" }
-                    ))
-                    .color(station.muted),
-                );
-            });
-        });
+        let (name, stats_line, audio, note) = signal;
+        lamp(ui, &station, true);
+        ui.add_space(8.0);
+        if column_key(ui, &station, "Stop broadcasting").clicked() {
+            self.ctrl.stop_broadcast(StopReason::Stopped);
+            self.viewer_count = 0;
+        }
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(format!("Sharing {}", truncate(&name, 32)))
+                .color(station.body)
+                .size(16.0),
+        );
+        ui.label(
+            RichText::new(format!(
+                "{viewers} viewer{}",
+                if viewers == 1 { "" } else { "s" }
+            ))
+            .color(station.muted),
+        );
         if let Some(line) = stats_line {
             ui.label(
                 RichText::new(line)
@@ -531,81 +534,33 @@ impl App {
         if let Some(audio) = audio {
             ui.label(RichText::new(audio).color(station.muted));
         }
-        if system_audio {
-            mute_apps::ui(
-                ui,
-                &self.ctrl.audio_apps,
-                &self.muted_apps,
-                &mut self.settings,
-                &self.dir,
-            );
-        }
         if let Some(note) = note {
             ui.colored_label(ui.visuals().warn_fg_color, note);
         }
     }
 
-    /// A source or quality row. Returns whether it was clicked.
-    fn setting_row(&self, ui: &mut egui::Ui, label: &str, value: &str) -> bool {
-        let station = station_of(ui);
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
-        let fill = if response.hovered() {
-            station.key_hover
-        } else {
-            station.key
-        };
-        paint_key(ui, rect, fill, station.line, station.line_w);
-        let painter = ui.painter();
-        painter.text(
-            rect.left_center() + vec2(10.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            FontId::new(13.0, theme::condensed()),
-            station.muted,
-        );
-        painter.text(
-            rect.right_center() - vec2(10.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            value,
-            FontId::proportional(14.0),
-            station.body,
-        );
-        response.clicked()
-    }
-
-    fn source_title(&self) -> String {
-        self.sources
-            .get(self.selected)
-            .map(|source| source_caption(source).0)
-            .unwrap_or_else(|| "Choose a source".to_string())
-    }
-
     fn open_picker(&mut self) {
         self.refresh_sources();
-        self.thumbs.begin(&self.sources);
+        self.thumbs.ensure(&self.sources);
         self.picker = true;
     }
 
     fn close_picker(&mut self) {
         self.picker = false;
-        self.thumbs.clear();
     }
 
     fn live_bar(&mut self, ui: &mut egui::Ui) {
-        let Some((source_name, has_audio, port)) = self.ctrl.broadcast.as_ref().map(|broadcast| {
-            (
-                broadcast.source_name.clone(),
-                broadcast.audio.is_some(),
-                broadcast.port,
-            )
-        }) else {
+        let Some((source_name, port)) = self
+            .ctrl
+            .broadcast
+            .as_ref()
+            .map(|broadcast| (broadcast.source_name.clone(), broadcast.port))
+        else {
             return;
         };
         let station = station_of(ui);
         let source = truncate(&source_name, 36);
         let quality = preset_short(self.preset);
-        let audio = if has_audio { "With audio" } else { "No audio" };
         let fingerprint = self.ctrl.fingerprint().to_hex();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Source").color(station.muted));
@@ -613,79 +568,70 @@ impl App {
             ui.add_space(10.0);
             ui.label(RichText::new("Quality").color(station.muted));
             ui.label(RichText::new(quality).color(station.body));
-            ui.add_space(10.0);
-            ui.label(RichText::new(audio).color(station.muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if station_button(ui, &station, "Stop broadcasting", station.dark).clicked() {
-                    self.ctrl.stop_broadcast(StopReason::Stopped);
-                    self.viewer_count = 0;
-                }
-                ui.scope(|ui| {
-                    let (fill, ink) = key_colors(&station, station.dark);
-                    ui.style_mut().visuals.widgets.inactive.bg_fill = fill;
-                    ui.style_mut().visuals.widgets.hovered.bg_fill = fill;
-                    ui.style_mut().visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, ink);
-                    ui.style_mut().visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, ink);
-                    ui.menu_button("Copy connect string", |ui| {
-                        ui.label(
-                            "For viewers who can't see you in the list. \
-                             Pick the network they share with you:",
-                        );
-                        let adapters = local_ipv4s();
-                        if adapters.is_empty() {
-                            ui.label("No network adapters found");
+                let copy = station_key(&station, "Copy connect string", station.dark, 48.0, 18.0);
+                egui::containers::menu::MenuButton::from_button(copy).ui(ui, |ui| {
+                    ui.label(
+                        "For viewers who can't see you in the list. \
+                         Pick the network they share with you:",
+                    );
+                    let adapters = local_ipv4s();
+                    if adapters.is_empty() {
+                        ui.label("No network adapters found");
+                    }
+                    for (adapter, ip) in adapters {
+                        let connect = format!("{ip}:{port}#{fingerprint}");
+                        if ui
+                            .button(format!("{adapter} · {ip}"))
+                            .on_hover_text(&connect)
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(connect);
+                            ui.close();
                         }
-                        for (adapter, ip) in adapters {
-                            let connect = format!("{ip}:{port}#{fingerprint}");
-                            if ui
-                                .button(format!("{adapter} · {ip}"))
-                                .on_hover_text(&connect)
-                                .clicked()
-                            {
-                                ui.ctx().copy_text(connect);
-                                ui.close();
-                            }
-                        }
-                    });
+                    }
                 });
             });
         });
     }
 
-    /// "Share audio" checkbox, with exactly what it would capture for the selected source.
-    fn share_audio_ui(&mut self, ui: &mut egui::Ui) {
+    /// Share audio sits above Quality in the source modal. The broadcast starts with this
+    /// choice; changing it while a line is already open stops and starts again.
+    fn share_audio_toggle(&mut self, ui: &mut egui::Ui) {
         let audio = self.sources.get(self.selected).and_then(audio_source);
         let supported = audio.as_ref().is_some_and(peeroxide_audio::is_supported);
-        ui.add_space(2.0);
-        let checkbox = ui
-            .add_enabled(
-                supported,
-                egui::Checkbox::new(&mut self.settings.share_audio, "Share audio"),
-            )
-            .on_disabled_hover_text(if audio.is_none() {
+        let station = station_of(ui);
+        let mut share = self.settings.share_audio;
+        let mut response = ui.add_enabled(
+            supported,
+            egui::Checkbox::new(
+                &mut share,
+                RichText::new("Share audio").size(15.0).color(station.body),
+            ),
+        );
+        if !supported {
+            response = response.on_disabled_hover_text(if audio.is_none() {
                 "Can't tell which app plays this window's sound"
             } else {
                 "Audio sharing isn't available on this system yet"
             });
-        if checkbox.changed() {
-            self.save_settings();
-        }
-        if let Some(audio) = audio.filter(|_| supported && self.settings.share_audio) {
-            let scope = describe_audio(&audio);
+        } else if let Some(audio) = &audio {
+            let scope = describe_audio(audio);
             let mut chars = scope.chars();
             let scope: String = chars
                 .next()
                 .map(|c| c.to_uppercase().chain(chars).collect())
                 .unwrap_or_default();
-            ui.weak(format!("{scope}. Your microphone is never shared."));
-            if matches!(audio, AudioSource::System { .. }) {
-                mute_apps::ui(
-                    ui,
-                    &self.ctrl.audio_apps,
-                    &self.muted_apps,
-                    &mut self.settings,
-                    &self.dir,
-                );
+            response = response.on_hover_text(format!(
+                "{scope}. Your microphone is never shared. Changing this restarts the broadcast, \
+                 so viewers connect again."
+            ));
+        }
+        if response.changed() {
+            self.settings.share_audio = share;
+            self.save_settings();
+            if self.ctrl.broadcast.is_some() {
+                self.start_broadcast();
             }
         }
     }
@@ -694,8 +640,8 @@ impl App {
         let station = station_of(ui);
         ui.label(
             RichText::new("Broadcasting on this network")
-                .color(station.muted)
-                .font(FontId::new(13.0, theme::condensed())),
+                .color(station.body)
+                .font(FontId::new(15.0, theme::condensed())),
         );
         if self.peers.is_empty() {
             let text = self
@@ -739,13 +685,20 @@ impl App {
                 );
             }
             let mark = if changed_id.is_some() || (same_name && !saved) {
-                Some("Check ID")
-            } else if saved {
-                Some("Saved")
+                format!("{short}  Check ID")
             } else {
-                None
+                "Live".to_string()
             };
-            let response = plate(ui, &station, &peer.name, &short, false, selected, mark);
+            let response = plate(
+                ui,
+                &station,
+                &peer.name,
+                &short,
+                false,
+                true,
+                selected,
+                Some(&mark),
+            );
             if response.on_hover_text(hover).clicked() && !selected {
                 picked = PeerTarget::from_peer(peer);
             }
@@ -795,12 +748,21 @@ impl App {
                     if ui.small_button("Forget").clicked() {
                         forget = true;
                     }
-                    let row = plate(ui, &station, &c.name, &short, true, selected, Some("Saved"))
-                        .on_hover_text(format!(
-                            "ID {short}\nLast watched {}\n{}",
-                            ago(now, c.last_seen),
-                            addrs.join("\n")
-                        ));
+                    let row = plate(
+                        ui,
+                        &station,
+                        &c.name,
+                        &short,
+                        true,
+                        false,
+                        selected,
+                        Some("Saved"),
+                    )
+                    .on_hover_text(format!(
+                        "ID {short}\nLast watched {}\n{}",
+                        ago(now, c.last_seen),
+                        addrs.join("\n")
+                    ));
                     open = row.clicked() && !selected;
                 });
             });
@@ -839,25 +801,7 @@ impl App {
                     self.apply(ViewerInput::StopWatching);
                 }
             }
-            ViewerState::Streaming {
-                broadcaster_name, ..
-            } => {
-                ui.label(RichText::new(format!("Watching {broadcaster_name}")).color(station.body));
-                self.volume_ui(ui);
-                ui.horizontal(|ui| {
-                    if ui.button("■ Stop watching").clicked() {
-                        self.apply(ViewerInput::StopWatching);
-                    }
-                    if ui
-                        .button("⛶ Fullscreen")
-                        .on_hover_text("Or press F11, or double-click the video. Esc leaves.")
-                        .clicked()
-                    {
-                        self.fullscreen_toggle = true;
-                    }
-                    mini_player_button(ui);
-                });
-            }
+            ViewerState::Streaming { .. } => self.volume_ui(ui),
             ViewerState::Disconnected { reason, .. } => {
                 ui.colored_label(ui.visuals().warn_fg_color, reason);
                 if ui.button("OK").clicked() {
@@ -1146,15 +1090,26 @@ impl App {
         match self.viewer.clone() {
             ViewerState::Streaming { .. } => {
                 let overlay = self.watch_overlay();
-                if self
-                    .video
-                    .lock()
-                    .unwrap()
-                    .ui(ui, &self.ctrl.video, &overlay)
-                    .double_clicked()
-                {
+                let bar_h = 40.0;
+                let gap = 10.0;
+                let video_h = (ui.available_height() - bar_h - gap).max(1.0);
+                let played = ui
+                    .allocate_ui_with_layout(
+                        vec2(ui.available_width(), video_h),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            self.video
+                                .lock()
+                                .unwrap()
+                                .ui(ui, &self.ctrl.video, &overlay)
+                        },
+                    )
+                    .inner;
+                if played.double_clicked() {
                     self.fullscreen_toggle = true;
                 }
+                ui.add_space(gap);
+                self.watch_actions(ui);
             }
             ViewerState::Connecting { peer } => {
                 VideoView::placeholder(ui, &format!("Connecting to {}…", peer.name));
@@ -1164,6 +1119,63 @@ impl App {
             }
             ViewerState::Idle => self.own_well(ui),
         }
+    }
+
+    /// The three picture controls sit under the video, centered.
+    /// The bottom bar belongs to the broadcast, and it is absent when this window is only watching.
+    fn watch_actions(&mut self, ui: &mut egui::Ui) {
+        let station = station_of(ui);
+        let id = ui.id().with("watch-actions-width");
+        ui.horizontal(|ui| {
+            let known: Option<f32> = ui.data(|data| data.get_temp(id));
+            if let Some(width) = known {
+                ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
+            }
+            let width = ui
+                .scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.horizontal(|ui| {
+                        if icon_key(
+                            ui,
+                            &station,
+                            "Stop watching",
+                            egui::include_image!("../../../assets/icons/monitor-off.svg"),
+                        )
+                        .clicked()
+                        {
+                            self.apply(ViewerInput::StopWatching);
+                        }
+                        if icon_key(
+                            ui,
+                            &station,
+                            "Fullscreen. Or press F11, or double-click the video. Esc leaves.",
+                            egui::include_image!("../../../assets/icons/monitor-screenshot.svg"),
+                        )
+                        .clicked()
+                        {
+                            self.fullscreen_toggle = true;
+                        }
+                        if icon_key(
+                            ui,
+                            &station,
+                            "Mini player. Keep watching in a small window on top. Minimizing does the same.",
+                            egui::include_image!("../../../assets/icons/pip.svg"),
+                        )
+                        .clicked()
+                        {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                    });
+                })
+                .response
+                .rect
+                .width();
+            ui.data_mut(|data| data.insert_temp(id, width));
+            if known.is_none_or(|old| (old - width).abs() > 0.5) {
+                ui.ctx().request_repaint();
+            }
+        });
     }
 
     /// The station's own screen: empty before Start, a copy of a captured frame while someone
@@ -1247,6 +1259,8 @@ impl App {
     }
 
     fn source_modal(&mut self, ctx: &egui::Context) {
+        // Apply stills that arrived before this paint, so the cards don't open empty.
+        self.thumbs.poll(ctx);
         let station = if ctx.global_style().visuals.dark_mode {
             Station::dark()
         } else {
@@ -1254,12 +1268,13 @@ impl App {
         };
         let mut close = false;
         let mut refresh = false;
+        let mut begin = false;
         let response = egui::Modal::new(egui::Id::new("source-picker"))
             .frame(
                 egui::Frame::NONE
                     .fill(station.key)
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .inner_margin(egui::Margin::same(20)),
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(24)),
             )
             .show(ctx, |ui| {
                 ui.set_min_width(820.0);
@@ -1267,15 +1282,22 @@ impl App {
                     ui.label(
                         RichText::new("Source")
                             .color(station.ink)
-                            .size(22.0)
-                            .strong(),
+                            .font(FontId::new(22.0, theme::condensed())),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("×").size(22.0).color(station.muted),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("Close")
+                            .clicked()
+                        {
                             close = true;
                         }
-                        if ui
-                            .button("Refresh")
+                        if refresh_button(ui, station.muted)
                             .on_hover_text("Look for windows again")
                             .clicked()
                         {
@@ -1297,7 +1319,25 @@ impl App {
                             }
                         });
                     });
-                ui.add_space(8.0);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    self.share_audio_toggle(ui);
+                    ui.add_space(16.0);
+                    let monitor = self
+                        .sources
+                        .get(self.selected)
+                        .and_then(audio_source)
+                        .is_some_and(|audio| matches!(audio, AudioSource::System { .. }));
+                    mute_apps::ui(
+                        ui,
+                        &self.ctrl.audio_apps,
+                        &self.muted_apps,
+                        &mut self.settings,
+                        &self.dir,
+                        monitor,
+                    );
+                });
+                ui.add_space(10.0);
                 ui.label(
                     RichText::new("Quality")
                         .color(station.muted)
@@ -1309,12 +1349,19 @@ impl App {
                         self.preset_chip(ui, &station, preset);
                     }
                 });
+                ui.add_space(16.0);
+                if column_key(ui, &station, "Start broadcasting").clicked() {
+                    begin = true;
+                }
             });
-        if close || response.should_close() {
+        if begin {
+            self.close_picker();
+            self.start_broadcast();
+        } else if close || response.should_close() {
             self.close_picker();
         } else if refresh {
             self.refresh_sources();
-            self.thumbs.begin(&self.sources);
+            self.thumbs.ensure(&self.sources);
         }
     }
 
@@ -1325,55 +1372,53 @@ impl App {
         let (title, detail) = source_caption(&source);
         let selected = index == self.selected;
         let id = source.id();
-        ui.allocate_ui(vec2(width, 168.0), |ui| {
-            let (rect, response) = ui.allocate_exact_size(vec2(width, 112.0), Sense::click());
-            ui.painter().rect_filled(rect, 2.0, station.well);
-            if let Some(texture) = self.thumbs.texture(ui.ctx(), &id) {
-                let size = texture.size_vec2();
-                let scale = (rect.width() / size.x).min(rect.height() / size.y);
-                let image = Rect::from_center_size(rect.center(), size * scale);
-                ui.painter().image(
-                    texture.id(),
-                    image,
-                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-            if selected {
-                ui.painter().rect_stroke(
-                    rect,
-                    2.0,
-                    station.selected_stroke(),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let mut clicked = response.clicked();
-            clicked |= ui
-                .add(
-                    egui::Label::new(
-                        RichText::new(truncate(&title, 28))
-                            .color(station.ink)
-                            .size(14.0),
-                    )
-                    .sense(Sense::click()),
-                )
-                .clicked();
-            if !detail.is_empty() {
-                clicked |= ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(truncate(&detail, 32))
-                                .color(station.muted)
-                                .font(FontId::new(12.0, theme::condensed())),
-                        )
-                        .sense(Sense::click()),
-                    )
-                    .clicked();
-            }
-            if clicked {
-                self.selected = index;
-            }
-        });
+        let (rect, response) = ui.allocate_exact_size(vec2(width, 172.0), Sense::click());
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, 3.0, station.key_hover);
+        }
+        let image = Rect::from_min_size(rect.min, vec2(rect.width(), 112.0));
+        painter.rect_filled(image, 2.0, station.well);
+        if let Some(texture) = self.thumbs.texture(ui.ctx(), &id) {
+            let size = texture.size_vec2();
+            let scale = (image.width() / size.x).min(image.height() / size.y);
+            let fitted = Rect::from_center_size(image.center(), size * scale);
+            painter.image(
+                texture.id(),
+                fitted,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        let stroke = if selected {
+            station.selected_stroke()
+        } else if response.hovered() {
+            Stroke::new(1.0, station.line)
+        } else {
+            Stroke::NONE
+        };
+        if stroke != Stroke::NONE {
+            painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+        }
+        painter.text(
+            image.left_bottom() + vec2(2.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            truncate(&title, 28),
+            FontId::proportional(14.0),
+            station.ink,
+        );
+        if !detail.is_empty() {
+            painter.text(
+                image.left_bottom() + vec2(2.0, 24.0),
+                egui::Align2::LEFT_TOP,
+                truncate(&detail, 32),
+                FontId::new(12.0, theme::condensed()),
+                station.muted,
+            );
+        }
+        if response.clicked() {
+            self.selected = index;
+        }
     }
 
     fn preset_chip(&mut self, ui: &mut egui::Ui, station: &Station, preset: Preset) {
@@ -1383,7 +1428,7 @@ impl App {
             Some(note) => format!("{label}\n{note}"),
             None => label.to_string(),
         };
-        let response = station_button(ui, station, &text, selected);
+        let response = station_button(ui, station, &text, selected, 36.0, 14.0);
         let mut hint = format!(
             "Up to {}×{}, at most {} Mbps of upload.",
             preset.max_width,
@@ -1411,6 +1456,11 @@ impl eframe::App for App {
     /// Also runs while the main window is minimized, when `ui` doesn't: that's when the mini
     /// player has to appear.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.thumbs_started {
+            self.thumbs_started = true;
+            self.thumbs.begin(&self.sources);
+        }
+        self.thumbs.poll(ctx);
         let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
         if !minimized {
             return;
@@ -1452,8 +1502,6 @@ impl eframe::App for App {
         // Source and quality stay as they were when the line opened.
         if live && self.picker {
             self.close_picker();
-        } else if self.picker {
-            self.thumbs.poll(ui.ctx());
         }
         if live && self.viewer_count > 0 && matches!(self.viewer, ViewerState::Idle) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -1560,32 +1608,171 @@ fn key_colors(station: &Station, strong: bool) -> (Color32, Color32) {
     }
 }
 
-fn station_button(
-    ui: &mut egui::Ui,
+fn station_key<'a>(
     station: &Station,
-    text: &str,
+    text: &'a str,
     strong: bool,
-) -> egui::Response {
+    min_height: f32,
+    font_size: f32,
+) -> egui::Button<'a> {
     let (fill, ink) = key_colors(station, strong);
     let stroke = if strong {
         Stroke::NONE
     } else {
         Stroke::new(station.line_w, station.line)
     };
-    ui.add(
-        egui::Button::new(RichText::new(text).color(ink))
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(egui::CornerRadius::same(2)),
+    egui::Button::new(
+        RichText::new(text)
+            .color(ink)
+            .font(FontId::new(font_size, theme::condensed())),
     )
+    .fill(fill)
+    .stroke(stroke)
+    .corner_radius(egui::CornerRadius::same(3))
+    .min_size(vec2(0.0, min_height))
 }
 
-fn paint_key(ui: &egui::Ui, rect: Rect, fill: Color32, line: Color32, width: f32) {
-    ui.painter().rect_filled(rect, 2.0, fill);
+fn station_button(
+    ui: &mut egui::Ui,
+    station: &Station,
+    text: &str,
+    strong: bool,
+    min_height: f32,
+    font_size: f32,
+) -> egui::Response {
+    ui.add(station_key(station, text, strong, min_height, font_size))
+}
+
+/// Moon, sun, or a computer, for the theme currently in use.
+fn theme_button(ui: &mut egui::Ui, station: &Station, choice: ThemeChoice) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .circle_filled(rect.center(), 12.0, station.key_hover);
+    }
+    let color = station.body;
+    let behind = if response.hovered() {
+        station.key_hover
+    } else {
+        station.housing
+    };
+    match choice {
+        ThemeChoice::Dark => paint_moon(ui.painter(), rect.center(), color, behind),
+        ThemeChoice::Light => paint_sun(ui.painter(), rect.center(), color),
+        ThemeChoice::System => paint_computer(ui.painter(), rect.center(), color),
+    }
+    response
+}
+
+fn paint_sun(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    painter.circle_filled(center, 3.4, color);
+    let stroke = Stroke::new(1.6, color);
+    for i in 0..8 {
+        let angle = i as f32 * std::f32::consts::TAU / 8.0;
+        let dir = vec2(angle.cos(), angle.sin());
+        painter.line_segment([center + dir * 5.4, center + dir * 8.2], stroke);
+    }
+}
+
+fn paint_moon(painter: &egui::Painter, center: egui::Pos2, color: Color32, behind: Color32) {
+    let body = center + vec2(-1.4, 0.6);
+    painter.circle_filled(body, 6.4, color);
+    painter.circle_filled(body + vec2(3.5, -2.1), 5.5, behind);
+}
+
+fn icon_key(
+    ui: &mut egui::Ui,
+    station: &Station,
+    hover: &str,
+    source: egui::ImageSource<'static>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+    let fill = if response.hovered() {
+        station.key_hover
+    } else {
+        station.key
+    };
+    paint_key(ui, rect, fill, station.line, station.line_w, 3.0);
+    let icon = Rect::from_center_size(rect.center(), vec2(22.0, 22.0));
+    egui::Image::new(source)
+        .tint(station.body)
+        .paint_at(ui, icon);
+    response.on_hover_text(hover)
+}
+
+fn paint_computer(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let screen = Rect::from_center_size(center + vec2(0.0, -2.0), vec2(14.0, 9.0));
+    painter.rect_stroke(
+        screen,
+        1.5,
+        Stroke::new(1.5, color),
+        egui::StrokeKind::Inside,
+    );
+    let neck = screen.center_bottom();
+    let stroke = Stroke::new(1.5, color);
+    painter.line_segment([neck, neck + vec2(0.0, 3.2)], stroke);
+    painter.line_segment([neck + vec2(-4.2, 3.2), neck + vec2(4.2, 3.2)], stroke);
+}
+
+/// A circular arrow, same weight as the close mark beside it.
+fn refresh_button(ui: &mut egui::Ui, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+    let color = if response.hovered() {
+        color.linear_multiply(1.35)
+    } else {
+        color
+    };
+    let center = rect.center();
+    let radius = 6.5;
+    let stroke = Stroke::new(1.7, color);
+    let start = -0.5_f32;
+    let end = std::f32::consts::TAU - 1.05;
+    let steps = 20;
+    let points = (0..=steps)
+        .map(|i| {
+            let t = start + (end - start) * (i as f32 / steps as f32);
+            center + vec2(radius * t.cos(), radius * t.sin())
+        })
+        .collect();
+    let painter = ui.painter();
+    painter.add(egui::Shape::line(points, stroke));
+    let forward = vec2(-end.sin(), end.cos());
+    let side = vec2(-forward.y, forward.x);
+    let tip = center + vec2(radius * end.cos(), radius * end.sin()) + forward * 2.2;
+    let back = tip - forward * 5.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, back + side * 3.1, back - side * 3.1],
+        color,
+        Stroke::NONE,
+    ));
+    response
+}
+
+/// The column's strong key. Start opens the picker; Stop sits in the same place once live.
+fn column_key(ui: &mut egui::Ui, station: &Station, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+    let fill = if response.hovered() {
+        station.strong_fill.linear_multiply(0.92)
+    } else {
+        station.strong_fill
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::new(18.0, theme::condensed()),
+        station.strong_ink,
+    );
+    response
+}
+
+fn paint_key(ui: &egui::Ui, rect: Rect, fill: Color32, line: Color32, width: f32, radius: f32) {
+    ui.painter().rect_filled(rect, radius, fill);
     if width > 0.0 {
         ui.painter().rect_stroke(
             rect,
-            2.0,
+            radius,
             Stroke::new(width, line),
             egui::StrokeKind::Inside,
         );
@@ -1593,7 +1780,7 @@ fn paint_key(ui: &egui::Ui, rect: Rect, fill: Color32, line: Color32, width: f32
 }
 
 fn lamp(ui: &mut egui::Ui, station: &Station, on: bool) {
-    let diameter = if on { 22.0 } else { 16.0 };
+    let diameter = if on { 44.0 } else { 28.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(diameter, diameter), Sense::hover());
     let center = rect.center();
     if on {
@@ -1611,43 +1798,76 @@ fn lamp(ui: &mut egui::Ui, station: &Station, on: bool) {
 }
 
 /// A paper nameplate. `hollow` is the saved mark: a ring instead of a filled dot.
+/// `on_air` is someone broadcasting now: a larger name and a lamp for the dot.
 fn plate(
     ui: &mut egui::Ui,
     station: &Station,
     name: &str,
     id: &str,
     hollow: bool,
+    on_air: bool,
     selected: bool,
     mark: Option<&str>,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
-    let stroke = if selected { 2.0 } else { station.line_w };
-    let line = if selected { station.ink } else { station.line };
-    paint_key(ui, rect, station.paper, line, stroke);
-    let painter = ui.painter();
-    let dot = rect.left_center() + vec2(16.0, 0.0);
-    if hollow {
-        painter.circle_stroke(dot, 4.0, Stroke::new(1.5, station.ink));
-    } else {
-        painter.circle_filled(dot, 4.0, station.ink);
-    }
-    painter.text(
-        dot + vec2(12.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        truncate(name, 16),
-        FontId::proportional(14.0),
-        station.ink,
-    );
+    let name_text = truncate(name, if on_air { 28 } else { 22 });
     let right = match mark {
+        Some("Live") => "Live".to_string(),
+        Some(mark) if on_air => mark.to_string(),
         Some(mark) => format!("{id}  {mark}"),
         None => id.to_string(),
+    };
+    let name_size = if on_air { 16.0 } else { 14.0 };
+    let (name_w, right_w) = ui.ctx().fonts_mut(|fonts| {
+        let name_w = fonts
+            .layout_no_wrap(
+                name_text.clone(),
+                FontId::proportional(name_size),
+                station.ink,
+            )
+            .size()
+            .x;
+        let right_w = fonts
+            .layout_no_wrap(
+                right.clone(),
+                FontId::new(12.0, theme::condensed()),
+                station.ink,
+            )
+            .size()
+            .x;
+        (name_w, right_w)
+    });
+    let width = (12.0 + 8.0 + 12.0 + name_w + 12.0 + right_w + 12.0).min(ui.available_width());
+    let height = if on_air { 40.0 } else { 34.0 };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let stroke = if selected { 2.0 } else { station.line_w };
+    let line = if selected { station.ink } else { station.line };
+    paint_key(ui, rect, station.paper, line, stroke, 2.0);
+    let painter = ui.painter();
+    let dot = rect.left_center() + vec2(16.0, 0.0);
+    let dot_color = if on_air { station.lamp } else { station.ink };
+    if hollow {
+        painter.circle_stroke(dot, 4.5, Stroke::new(1.5, station.ink));
+    } else {
+        painter.circle_filled(dot, if on_air { 5.0 } else { 4.0 }, dot_color);
+    }
+    painter.text(
+        dot + vec2(14.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        name_text,
+        FontId::proportional(name_size),
+        station.ink,
+    );
+    let right_color = if right == "Live" {
+        station.lamp
+    } else {
+        station.ink
     };
     painter.text(
         rect.right_center() - vec2(10.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         right,
         FontId::new(12.0, theme::condensed()),
-        station.ink,
+        right_color,
     );
     response
 }

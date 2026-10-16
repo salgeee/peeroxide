@@ -86,7 +86,7 @@ impl Station {
 
     /// The stroke around a selected thumbnail: paper on the dark station, ink on the light one.
     pub fn selected_stroke(&self) -> Stroke {
-        Stroke::new(2.0, if self.dark { self.paper } else { self.ink })
+        Stroke::new(3.0, if self.dark { self.paper } else { self.ink })
     }
 }
 
@@ -122,7 +122,14 @@ fn style(station: Station) -> egui::Style {
     v.dark_mode = station.dark;
     v.window_fill = station.housing;
     v.panel_fill = station.housing;
+    // The preview well stays near-black in both themes. Typed text uses the ink color,
+    // so a light station's field has to stay paper or the letters disappear on it.
     v.extreme_bg_color = station.well;
+    v.text_edit_bg_color = Some(if station.dark {
+        station.well
+    } else {
+        station.paper
+    });
     v.faint_bg_color = station.key;
     v.widgets.noninteractive.bg_fill = station.housing;
     v.widgets.noninteractive.fg_stroke = body;

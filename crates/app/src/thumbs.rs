@@ -1,16 +1,18 @@
-//! One still frame per source, fetched off the UI thread while the picker is open.
+//! One still frame per source, the same capture the picker used to start on open.
 //!
-//! A live thumbnail of every window would start a capture per card. One frame, at most three
-//! at a time, is enough to tell the windows apart and then the capture stops.
+//! It starts when the app opens, off the UI thread. At most three at a time. A window
+//! that has since closed is no longer in the source list; one that opened later is fetched
+//! the same way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use peeroxide_capture::Source;
 
 enum Thumb {
-    Pending,
+    /// `u64` is the generation that spawned this fetch. A newer pass ignores the old result.
+    Pending(u64),
     Ready(ColorImage),
     Missing,
 }
@@ -45,43 +47,67 @@ impl Thumbnails {
         }
     }
 
-    /// Drops whatever was cached and starts again for `sources`.
+    /// Same fetch the picker used to run when it opened.
     pub fn begin(&mut self, sources: &[Source]) {
         self.generation = self.generation.wrapping_add(1);
         self.cache.clear();
         self.textures.clear();
         self.queue = sources.to_vec();
-        // Jobs from the previous open still finish; their generation no longer matches, and a
-        // few extra captures at the boundary are cheaper than cancelling a Graphics Capture session.
+        // Jobs from a previous pass still finish; their generation no longer matches.
         self.inflight = 0;
         self.pump();
     }
 
-    pub fn clear(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.cache.clear();
-        self.textures.clear();
-        self.queue.clear();
+    /// Keeps stills already taken and fetches only sources that do not have one yet.
+    /// A failed capture is tried again. Sources no longer listed are dropped.
+    pub fn ensure(&mut self, sources: &[Source]) {
+        let wanted: HashSet<String> = sources.iter().map(|source| source.id()).collect();
+        self.cache.retain(|id, _| wanted.contains(id));
+        self.textures.retain(|id, _| wanted.contains(id));
+        self.queue.retain(|source| wanted.contains(&source.id()));
+        let queued: HashSet<String> = self.queue.iter().map(|source| source.id()).collect();
+        for source in sources {
+            let id = source.id();
+            if queued.contains(&id)
+                || matches!(
+                    self.cache.get(&id),
+                    Some(Thumb::Ready(_) | Thumb::Pending(_))
+                )
+            {
+                continue;
+            }
+            self.cache.remove(&id);
+            self.queue.push(source.clone());
+        }
+        self.pump();
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.rx.try_recv() {
             self.inflight = self.inflight.saturating_sub(1);
-            if message.generation == self.generation {
-                self.cache.insert(
-                    message.id,
-                    match message.image {
-                        Ok(image) => Thumb::Ready(image),
-                        Err(error) => {
-                            tracing::debug!(%error, "thumbnail unavailable");
-                            Thumb::Missing
-                        }
-                    },
-                );
-                ctx.request_repaint();
+            let accept = matches!(
+                self.cache.get(&message.id),
+                Some(Thumb::Pending(expected)) if *expected == message.generation
+            );
+            if !accept {
+                continue;
             }
+            if let Err(error) = &message.image {
+                tracing::debug!(%error, id = %message.id, "thumbnail unavailable");
+            }
+            let thumb = match message.image {
+                Ok(image) if frame_visible(&image) => Thumb::Ready(image),
+                _ => Thumb::Missing,
+            };
+            self.cache.insert(message.id, thumb);
+            ctx.request_repaint();
         }
         self.pump();
+        // The stills arrive on other threads. The channel is only read on a frame, and a
+        // delayed wake does not keep arriving, so ask for the next frame while work remains.
+        if self.inflight > 0 || !self.queue.is_empty() {
+            ctx.request_repaint();
+        }
     }
 
     /// The still for `id`, once it has arrived. `None` while it is loading or it failed.
@@ -107,10 +133,10 @@ impl Thumbnails {
             if self.cache.contains_key(&id) {
                 continue;
             }
-            self.cache.insert(id.clone(), Thumb::Pending);
+            let generation = self.generation;
+            self.cache.insert(id.clone(), Thumb::Pending(generation));
             self.inflight += 1;
             let tx = self.tx.clone();
-            let generation = self.generation;
             let message_id = id.clone();
             if std::thread::Builder::new()
                 .name("thumb".into())
@@ -131,6 +157,11 @@ impl Thumbnails {
             }
         }
     }
+}
+
+/// A fully transparent frame composites as nothing, so the card stays the empty well.
+fn frame_visible(image: &ColorImage) -> bool {
+    image.pixels.iter().any(|pixel| pixel.a() > 0)
 }
 
 fn to_image(frame: peeroxide_capture::Frame) -> ColorImage {
